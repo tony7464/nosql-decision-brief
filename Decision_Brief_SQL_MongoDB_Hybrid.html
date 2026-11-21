@@ -1,0 +1,69 @@
+<html><head><meta charset="utf-8"><title>Decision Brief: SQL, MongoDB, or Hybrid?</title>
+<style>
+@page { size: letter; margin: 0.6in; }
+body { font-family: Calibri, Arial, sans-serif; font-size: 10pt; line-height: 1.25; }
+h1 { font-size: 15pt; margin: 0 0 2pt 0; }
+h2 { font-size: 11.5pt; margin: 8pt 0 2pt 0; color: #1f3864; }
+p { margin: 0 0 4pt 0; }
+table { border-collapse: collapse; width: 100%; font-size: 8.5pt; margin: 2pt 0 4pt 0; }
+th, td { border: 1px solid #999; padding: 2pt 4pt; vertical-align: top; text-align: left; }
+th { background: #dde4ee; }
+pre { font-family: Consolas, monospace; font-size: 8pt; margin: 2pt 0; padding: 3pt; background: #f4f4f4; border: 1px solid #ccc; line-height: 1.1; }
+.sub { font-size: 9pt; color: #444; margin-bottom: 4pt; }
+</style></head><body>
+<h1>Decision Brief: SQL, MongoDB, or Hybrid? (Northstar Market Product Catalog)</h1>
+<p class="sub">Jose Rayos &nbsp;|&nbsp; Process used: Define → Relate → Test → Bound</p>
+
+<h2>1. Business Problem Summary (Define)</h2>
+<p>Northstar Market's catalog started out simple, every product had a name, price, category, inventory count, and supplier, so a relational table was a great fit. Now the store sells electronics, clothing, books, furniture, and digital subscriptions, and each of those comes with its own set of details (battery life and warranty, sizes and fabric, ISBN and edition, dimensions and assembly, license type and renewal period). The SQL design has handled that by adding lots of nullable columns, extra category tables that need joins, and one-off workarounds, so most rows are mostly empty and building a product page means stitching several tables together. Every new category turns into a schema change plus code changes, which is why the dev team says expansion takes too long. The business impact is slower product launches, more bugs in product updates, and more maintenance time, so the real decision isn't "which tool is cooler," it's which storage model fits data that is shared at the top but different underneath, without hurting the parts of the business that need strict structure.</p>
+
+<h2>2. SQL vs. MongoDB Comparison (Relate)</h2>
+<table>
+<tr><th style="width:13%">Category</th><th style="width:43%">SQL (relational)</th><th style="width:44%">MongoDB (document)</th></tr>
+<tr><td>Data shape</td><td>Great for predictable rows. Varied category fields turn into nullable columns or extra tables (the current pain).</td><td>Each product is one document, so shared fields stay on top and category details live in a nested <code>attributes</code> object that can differ per category.</td></tr>
+<tr><td>Relationships</td><td>Strong point. Foreign keys and joins are ideal for products ↔ orders ↔ payments ↔ suppliers.</td><td>Can reference other collections, but joins (<code>$lookup</code>) are clunkier. Works best when related data is read together and embedded.</td></tr>
+<tr><td>Access patterns</td><td>Product page needs several joins. Reports and cross-table totals are easy and fast.</td><td>Product page is one read of one document. Big cross-collection reports take more work (aggregation pipelines).</td></tr>
+<tr><td>Flexibility</td><td>New category = migration, new columns or tables, code change.</td><td>New category = insert documents with new attribute fields, no migration needed.</td></tr>
+<tr><td>Consistency</td><td>Enforced schema, constraints, and mature ACID transactions. Best for money and inventory counts that must be exact.</td><td>Single-document writes are atomic and multi-document transactions exist, but structure is only as consistent as the validation rules and naming discipline the team sets up.</td></tr>
+<tr><td>Maintenance</td><td>Easy to explain one table, harder as the workarounds pile up (the current situation).</td><td>Simpler model per product, but needs field-naming governance or documents drift (<code>battery_hours</code> vs <code>battery_life_hours</code>).</td></tr>
+<tr><td>Scalability</td><td>Scales well vertically and with read replicas, sharding is harder.</td><td>Built for horizontal scaling and high read volume, good for a growing catalog and traffic.</td></tr>
+</table>
+<p>Neither one wins every row. SQL is still the stronger choice for relationships, exact consistency, and reporting, while MongoDB clearly reduces the complexity that's actually hurting the catalog right now.</p>
+
+<h2>3. Access Pattern Analysis (Test)</h2>
+<table>
+<tr><th style="width:20%">Application action</th><th style="width:42%">How the app uses the data</th><th style="width:38%">What it means for the decision</th></tr>
+<tr><td>Display a complete product page</td><td>Highest-volume read. Needs shared fields plus every category-specific detail at once.</td><td>Favors MongoDB: one document read, no joins. Lookups by <code>sku</code> would need a unique index.</td></tr>
+<tr><td>Filter by category-specific attributes (e.g., size M, battery ≥ 20 hrs)</td><td>Shoppers filter within a category on fields that only exist for that category.</td><td>MongoDB handles it with dot notation (<code>attributes.size</code>). The common filters (category, price, status, popular attributes) would need indexes in production.</td></tr>
+<tr><td>Add a new product category</td><td>Merchandising adds a category (say, outdoor gear) with brand new fields.</td><td>The main pain point. MongoDB needs no migration, but a validation rule should still require <code>sku</code>, <code>name</code>, <code>category</code>, <code>price</code>, <code>inventory.in_stock</code>, <code>status</code>.</td></tr>
+<tr><td>Update inventory when an order is placed</td><td>Frequent small write that has to be exact and tied to the order.</td><td>Single-document update in MongoDB is atomic, but the order and payment side is transactional and fits SQL better.</td></tr>
+<tr><td>Produce inventory and sales reports</td><td>Finance and ops join products to orders, payments, and suppliers to sum revenue and stock value.</td><td>Favors SQL for joins and aggregates. Suggests keeping orders and reporting relational and syncing catalog data over.</td></tr>
+</table>
+
+<h2>4. Document Model Sketch (collection: <code>products</code>)</h2>
+<p>Every product uses the same shared top-level fields. Only <code>attributes</code> changes by category. Here's an electronics product, and a clothing product would have the exact same top half with <code>"attributes": {"sizes": ["S","M","L"], "colors": ["navy"], "fabric": "cotton", "care": "machine wash cold"}</code>.</p>
+<pre>{
+  "sku": "ELEC-1001",
+  "name": "Wireless Headphones",
+  "category": "electronics",
+  "price": 149.99,
+  "status": "active",
+  "supplier_id": "SUP-SOUNDWAVE",          // reference, supplier record lives elsewhere
+  "inventory": { "in_stock": 42, "warehouse": "West", "reorder_level": 10 },
+  "attributes": {                           // category-specific, varies per category
+    "warranty_months": 24,
+    "battery_life_hours": 30,
+    "compatible_devices": ["phone", "tablet", "laptop"]
+  },
+  "updated_at": "2026-11-21"
+}</pre>
+
+<h2>5. Embedding vs. Referencing Decision</h2>
+<p>I'd embed everything that's read together on the product page and belongs to only that product: the category <code>attributes</code>, the <code>inventory</code> snapshot (in stock, warehouse, reorder level), images, and variant info like sizes and colors. That keeps the busiest access pattern, the product page, to a single read, and it makes attribute filtering work with dot notation. I'd reference suppliers with <code>supplier_id</code> because one supplier ships many products and their contact or contract info gets updated on its own, so copying it into every document would mean updating hundreds of documents for one change. Reviews should also be separate since they grow without limit and would bloat the product document. Orders, payments, and financial reporting shouldn't be inside the catalog at all, they're transactional and relational, so they stay in SQL and just store the <code>sku</code>.</p>
+
+<h2>6. Final Recommendation: Hybrid (MongoDB for the catalog, SQL for transactions and reporting) (Bound)</h2>
+<p>I recommend a hybrid approach with clear boundaries. The product catalog (product details, category attributes, and the inventory snapshot shown on the page) moves to MongoDB, because that's exactly where the varied data shape is causing nullable columns, joins, and slow category launches. One document per product makes the product page a single read, lets merchandising add categories without migrations, and makes updates simpler, which hits the business goals of faster product updates, easier maintenance, and better page performance. Orders, payments, supplier contracts, and financial and inventory reporting stay in SQL, since they depend on relationships, exact totals, and transactions, and SQL already does that well. The two connect through <code>sku</code>, with catalog changes synced to SQL for reporting. I didn't pick SQL-only because it keeps the exact problem leadership is asking to fix, and while it could be patched with JSON columns, the team would still be fighting the schema every time a category is added. I didn't pick MongoDB-only because moving orders and payments would trade a catalog problem for a consistency and reporting problem in the most sensitive part of the business.</p>
+
+<h2>7. Assumptions and Risks</h2>
+<p>I'm assuming the catalog is read much more than it's written, that categories will keep changing, and that the team has (or can learn) MongoDB skills. Missing info that matters includes future reporting needs, real traffic and performance numbers, and whether inventory needs to be exact in real time on the product page. The biggest risks are documents drifting without schema validation and field-naming rules, the hybrid setup adding complexity (two systems, a sync job, and the possibility of the catalog and SQL disagreeing), indexes on category, price, status, and attributes that haven't been designed or tested yet, and transaction-heavy inventory workflows that might still need careful design even though MongoDB supports transactions. One condition that would change my recommendation is if leadership says inventory has to be decremented in the same transaction as every order with real-time accuracy across warehouses. In that case I'd keep inventory in SQL and only move descriptive product data to MongoDB, or if the category count stopped growing, a cleaned-up SQL design with a JSON attributes column might be enough on its own.</p>
+</body></html>
